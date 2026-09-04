@@ -242,7 +242,9 @@ class Transaction(EmbitBase):
         if annex is not None:
             h.update(hashes.sha256(compact.to_bytes(len(annex)) + annex))
         if sh == SIGHASH.SINGLE:
-            h.update(self.vout[input_index].serialize())
+            # BIP341: sha_single_output is the SHA256 of the corresponding
+            # output in CTxOut format (a single hash, unlike BIP143's sha256d).
+            h.update(hashes.sha256(self.vout[input_index].serialize()))
         if script is not None:
             h.update(
                 hashes.tagged_hash(
