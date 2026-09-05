@@ -51,11 +51,11 @@ def hash_script_pubkeys(script_pubkeys):
 
 
 class Transaction(EmbitBase):
-    def __init__(self, version=2, vin=[], vout=[], locktime=0):
+    def __init__(self, version=2, vin=None, vout=None, locktime=0):
         self.version = version
         self.locktime = locktime
-        self.vin = vin
-        self.vout = vout
+        self.vin = vin if vin is not None else []
+        self.vout = vout if vout is not None else []
         self.clear_cache()
 
     def clear_cache(self):
@@ -233,7 +233,11 @@ class Transaction(EmbitBase):
         # data about this input
         h.update(bytes([2 * ext_flag + int(annex is not None)]))
         if anyonecanpay:
-            h.update(self.vin[input_index].serialize())
+            # BIP341 ANYONECANPAY input data: outpoint (36) | amount (8) |
+            # scriptPubKey (compact size + script) | nSequence (4). The outpoint
+            # is the 32-byte prevout hash (internal byte order) + 4-byte index.
+            h.update(bytes(reversed(self.vin[input_index].txid)))
+            h.update(self.vin[input_index].vout.to_bytes(4, "little"))
             h.update(values[input_index].to_bytes(8, "little"))
             h.update(script_pubkeys[input_index].serialize())
             h.update(self.vin[input_index].sequence.to_bytes(4, "little"))
