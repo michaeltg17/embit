@@ -476,8 +476,12 @@ class PSBTView:
         # data about this input
         h.update(bytes([2 * ext_flag + int(annex is not None)]))
         if anyonecanpay:
+            # BIP341 ANYONECANPAY input data: outpoint (36) | amount (8) |
+            # scriptPubKey (compact size + script) | nSequence (4). The outpoint
+            # is the 32-byte prevout hash (internal byte order) + 4-byte index.
             vin = self.vin(input_index)
-            h.update(vin.serialize())
+            h.update(bytes(reversed(vin.txid)))
+            h.update(vin.vout.to_bytes(4, "little"))
             h.update(values[input_index].to_bytes(8, "little"))
             h.update(script_pubkeys[input_index].serialize())
             h.update(vin.sequence.to_bytes(4, "little"))
@@ -486,7 +490,9 @@ class PSBTView:
         if annex is not None:
             h.update(hashes.sha256(compact.to_bytes(len(annex)) + annex))
         if sh == SIGHASH.SINGLE:
-            h.update(self.vout(input_index).serialize())
+            # BIP341: sha_single_output is the SHA256 of the corresponding
+            # output in CTxOut format (a single hash, unlike BIP143's sha256d).
+            h.update(hashes.sha256(self.vout(input_index).serialize()))
         if script is not None:
             h.update(
                 hashes.tagged_hash(

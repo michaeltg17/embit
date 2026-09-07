@@ -358,3 +358,58 @@ class TaprootTest(TestCase):
             expected.hex(),
             "1c7ff10e259e88c0489a212ad76fcc43e969ea69b807fc2707fe4e8310239ea1",
         )
+
+    def test_sighash_taproot_single_psbtview(self):
+        """PSBTView.sighash_taproot is a copy of Transaction.sighash_taproot
+        (see the TODO in psbtview.py) and must stay in sync with it.
+        Regression test: for SIGHASH_SINGLE it must embed
+        ``sha_single_output`` = SHA256 of the corresponding output in CTxOut
+        format (a single SHA256, unlike BIP143's double-SHA256)."""
+        psbt = PSBT.from_string(TAP_PSBTS[0])
+        psbtv = PSBTView.view(BytesIO(psbt.serialize()))
+        values = [inp.utxo.value for inp in psbt.inputs]
+        script_pubkeys = [inp.utxo.script_pubkey for inp in psbt.inputs]
+        expected = psbt.sighash_taproot(
+            0, script_pubkeys=script_pubkeys, values=values, sighash=SIGHASH.SINGLE
+        )
+        self.assertEqual(
+            psbtv.sighash_taproot(
+                0, script_pubkeys=script_pubkeys, values=values, sighash=SIGHASH.SINGLE
+            ),
+            expected,
+        )
+        # Pin the exact known-answer value (matches the BIP341 SigMsg layout).
+        self.assertEqual(
+            expected.hex(),
+            "81b068b65bde71ad9f70124f0991c30ce9833bb6b92359677a95fd3468b3eab9",
+        )
+
+    def test_sighash_taproot_single_anyonecanpay_psbtview(self):
+        """PSBTView copy must also stay in sync for
+        SIGHASH_SINGLE | SIGHASH_ANYONECANPAY: the ANYONECANPAY input data is
+        outpoint (36) | amount (8) | scriptPubKey (compact size + script) |
+        nSequence (4) - no scriptSig, no extra sequence."""
+        psbt = PSBT.from_string(TAP_PSBTS[0])
+        psbtv = PSBTView.view(BytesIO(psbt.serialize()))
+        values = [inp.utxo.value for inp in psbt.inputs]
+        script_pubkeys = [inp.utxo.script_pubkey for inp in psbt.inputs]
+        expected = psbt.sighash_taproot(
+            0,
+            script_pubkeys=script_pubkeys,
+            values=values,
+            sighash=SIGHASH.SINGLE | SIGHASH.ANYONECANPAY,
+        )
+        self.assertEqual(
+            psbtv.sighash_taproot(
+                0,
+                script_pubkeys=script_pubkeys,
+                values=values,
+                sighash=SIGHASH.SINGLE | SIGHASH.ANYONECANPAY,
+            ),
+            expected,
+        )
+        # Pin the exact known-answer value (matches the BIP341 SigMsg layout).
+        self.assertEqual(
+            expected.hex(),
+            "53e908f1d62a203337b656d436a3f64a8e67208c3c67499e6efeec46eeb5789f",
+        )
