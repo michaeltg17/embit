@@ -1,12 +1,13 @@
 from unittest import TestCase
+from embit import hashes
 from embit.bip32 import HDKey
 from embit.networks import NETWORKS
-from embit.script import p2tr, address_to_scriptpubkey
+from embit.script import p2tr, address_to_scriptpubkey, Script
 from embit.descriptor import Descriptor
 from embit.psbt import DerivationPath, PSBT
 from embit.psbtview import PSBTView
 from embit.ec import SchnorrSig, PublicKey
-from embit.transaction import SIGHASH
+from embit.transaction import SIGHASH, Transaction, TransactionInput, TransactionOutput
 from io import BytesIO
 from binascii import unhexlify
 
@@ -265,3 +266,150 @@ class TaprootTest(TestCase):
             self.assertEqual(
                 inp1.final_scriptwitness, inp2.final_scriptwitness
             )  # test psbt and psbtview give the same results
+
+    def test_sighash_taproot_single(self):
+        """BIP341 SIGHASH_SINGLE embeds ``sha_single_output`` = SHA256 of the
+        corresponding output in CTxOut format (a single SHA256, unlike BIP143's
+        double-SHA256). Regression test: the raw (un-hashed) output
+        serialization must not be embedded directly in the SigMsg."""
+        tx = Transaction()
+        tx.version = 2
+        tx.locktime = 0
+        tx.vin.append(TransactionInput(txid=b"\x01" * 32, vout=0, sequence=0xFFFFFFFE))
+        # spent input's amount and scriptPubKey (lengths must match the inputs)
+        values = [100000]
+        script_pubkeys = [Script(b"\x00\x14" + b"\x02" * 20)]
+        tx.vout.append(TransactionOutput(value=54990, script_pubkey=Script(b"\x00\x14" + b"\x03" * 20)))
+        tx.vout.append(TransactionOutput(value=45010, script_pubkey=Script(b"\x00\x14" + b"\x04" * 20)))
+
+        # Independently build the BIP341 SigMsg for a key-path SIGHASH.SINGLE
+        # spend (spend_type=0, no annex, no leaf) and compare against the
+        # implementation.
+        sigmsg = (
+            bytes([SIGHASH.SINGLE])
+            + tx.version.to_bytes(4, "little")
+            + tx.locktime.to_bytes(4, "little")
+            + tx.hash_prevouts()
+            + tx.hash_amounts(values)
+            + tx.hash_script_pubkeys(script_pubkeys)
+            + tx.hash_sequence()
+            + bytes([0])  # spend_type (key-path, no annex)
+            + (0).to_bytes(4, "little")  # input_index
+            + hashes.sha256(tx.vout[0].serialize())  # sha_single_output
+        )
+        expected = hashes.tagged_hash("TapSighash", b"\x00" + sigmsg)
+
+        self.assertEqual(
+            tx.sighash_taproot(
+                0, script_pubkeys=script_pubkeys, values=values, sighash=SIGHASH.SINGLE
+            ),
+            expected,
+        )
+        # Pin the exact known-answer value.
+        self.assertEqual(
+            expected.hex(),
+            "52b3d410701e96e25706dbcad8ed97dfb375035feaf69c95dfdbabe7fbafbf58",
+        )
+
+    def test_sighash_taproot_single_anyonecanpay(self):
+        """BIP341 SIGHASH_SINGLE | SIGHASH_ANYONECANPAY takes the separate
+        ANYONECANPAY input path (outpoint | amount | scriptPubKey | nSequence)
+        but still embeds ``sha_single_output`` = SHA256 of the corresponding
+        output in CTxOut format."""
+        tx = Transaction()
+        tx.version = 2
+        tx.locktime = 0
+        tx.vin.append(TransactionInput(txid=b"\x01" * 32, vout=0, sequence=0xFFFFFFFE))
+        values = [100000]
+        script_pubkeys = [Script(b"\x00\x14" + b"\x02" * 20)]
+        tx.vout.append(TransactionOutput(value=54990, script_pubkey=Script(b"\x00\x14" + b"\x03" * 20)))
+        tx.vout.append(TransactionOutput(value=45010, script_pubkey=Script(b"\x00\x14" + b"\x04" * 20)))
+
+        # Independently build the BIP341 SigMsg for a key-path
+        # SIGHASH_SINGLE | SIGHASH_ANYONECANPAY spend (spend_type=0, no annex,
+        # no leaf). The ANYONECANPAY input data is:
+        #   outpoint (36) | amount (8) | scriptPubKey (compact size + script)
+        #   | nSequence (4)
+        sigmsg = (
+            bytes([SIGHASH.SINGLE | SIGHASH.ANYONECANPAY])
+            + tx.version.to_bytes(4, "little")
+            + tx.locktime.to_bytes(4, "little")
+            + bytes([0])  # spend_type (key-path, no annex)
+            + bytes(reversed(tx.vin[0].txid))  # outpoint: prevout hash (32)
+            + tx.vin[0].vout.to_bytes(4, "little")  # outpoint: prevout index (4)
+            + values[0].to_bytes(8, "little")  # amount (8)
+            + script_pubkeys[0].serialize()  # scriptPubKey (compact size + script)
+            + tx.vin[0].sequence.to_bytes(4, "little")  # nSequence (4)
+            + hashes.sha256(tx.vout[0].serialize())  # sha_single_output
+        )
+        expected = hashes.tagged_hash("TapSighash", b"\x00" + sigmsg)
+
+        self.assertEqual(
+            tx.sighash_taproot(
+                0,
+                script_pubkeys=script_pubkeys,
+                values=values,
+                sighash=SIGHASH.SINGLE | SIGHASH.ANYONECANPAY,
+            ),
+            expected,
+        )
+        # Pin the exact known-answer value.
+        self.assertEqual(
+            expected.hex(),
+            "1c7ff10e259e88c0489a212ad76fcc43e969ea69b807fc2707fe4e8310239ea1",
+        )
+
+    def test_sighash_taproot_single_psbtview(self):
+        """PSBTView.sighash_taproot is a copy of Transaction.sighash_taproot
+        (see the TODO in psbtview.py) and must stay in sync with it.
+        Regression test: for SIGHASH_SINGLE it must embed
+        ``sha_single_output`` = SHA256 of the corresponding output in CTxOut
+        format (a single SHA256, unlike BIP143's double-SHA256)."""
+        psbt = PSBT.from_string(TAP_PSBTS[0])
+        psbtv = PSBTView.view(BytesIO(psbt.serialize()))
+        values = [inp.utxo.value for inp in psbt.inputs]
+        script_pubkeys = [inp.utxo.script_pubkey for inp in psbt.inputs]
+        expected = psbt.sighash_taproot(
+            0, script_pubkeys=script_pubkeys, values=values, sighash=SIGHASH.SINGLE
+        )
+        self.assertEqual(
+            psbtv.sighash_taproot(
+                0, script_pubkeys=script_pubkeys, values=values, sighash=SIGHASH.SINGLE
+            ),
+            expected,
+        )
+        # Pin the exact known-answer value (matches the BIP341 SigMsg layout).
+        self.assertEqual(
+            expected.hex(),
+            "81b068b65bde71ad9f70124f0991c30ce9833bb6b92359677a95fd3468b3eab9",
+        )
+
+    def test_sighash_taproot_single_anyonecanpay_psbtview(self):
+        """PSBTView copy must also stay in sync for
+        SIGHASH_SINGLE | SIGHASH_ANYONECANPAY: the ANYONECANPAY input data is
+        outpoint (36) | amount (8) | scriptPubKey (compact size + script) |
+        nSequence (4) - no scriptSig, no extra sequence."""
+        psbt = PSBT.from_string(TAP_PSBTS[0])
+        psbtv = PSBTView.view(BytesIO(psbt.serialize()))
+        values = [inp.utxo.value for inp in psbt.inputs]
+        script_pubkeys = [inp.utxo.script_pubkey for inp in psbt.inputs]
+        expected = psbt.sighash_taproot(
+            0,
+            script_pubkeys=script_pubkeys,
+            values=values,
+            sighash=SIGHASH.SINGLE | SIGHASH.ANYONECANPAY,
+        )
+        self.assertEqual(
+            psbtv.sighash_taproot(
+                0,
+                script_pubkeys=script_pubkeys,
+                values=values,
+                sighash=SIGHASH.SINGLE | SIGHASH.ANYONECANPAY,
+            ),
+            expected,
+        )
+        # Pin the exact known-answer value (matches the BIP341 SigMsg layout).
+        self.assertEqual(
+            expected.hex(),
+            "53e908f1d62a203337b656d436a3f64a8e67208c3c67499e6efeec46eeb5789f",
+        )
